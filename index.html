@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>俄羅斯方塊</title>
+<style>
+:root{
+  color-scheme:light;
+  --bg:#e9ecf1; --panel:#f8f9fb; --ink:#1c2330; --muted:#5d6878; --line:#cfd6e0;
+  --well:#f2f4f8; --grid:#dde2ea; --accent:#3b5bdb;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    color-scheme:dark;
+    --bg:#0e1118; --panel:#171b25; --ink:#e6eaf2; --muted:#8c97a9; --line:#2a3140;
+    --well:#0b0d13; --grid:#171c27; --accent:#7c93ff;
+  }
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;min-height:100vh;display:flex;justify-content:center;padding:16px 10px 28px;-webkit-user-select:none;user-select:none}
+.app{display:grid;grid-template-columns:auto auto auto;gap:14px;align-items:start}
+.side{display:flex;flex-direction:column;gap:12px;width:128px}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px}
+.box h2{margin:0 0 6px;font-size:13px;font-weight:600;color:var(--muted)}
+.box canvas{display:block;width:100%;height:auto}
+.stat{font-size:24px;font-weight:800;font-variant-numeric:tabular-nums}
+#board{display:block;width:300px;max-width:100%;height:auto;border:1px solid var(--line);border-radius:10px;background:var(--well)}
+h1{grid-column:1/-1;margin:0;font-size:26px;font-weight:800;letter-spacing:.06em}
+.keys{font-size:12px;color:var(--muted);line-height:1.8}
+.pad{display:none;grid-column:1/-1;grid-template-columns:repeat(6,1fr);gap:8px}
+.pad button{height:52px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--ink);font-size:20px;cursor:pointer;touch-action:manipulation}
+.pad button:active{background:var(--accent);color:#fff}
+button:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+@media (max-width:640px){
+  .app{grid-template-columns:1fr auto;gap:10px;max-width:420px}
+  .app>.left{grid-column:1/-1;grid-row:2;flex-direction:row;width:auto}
+  .app>.left .box{flex:1}
+  .keys{display:none}
+  .side{width:96px}
+  #board{width:100%}
+}
+@media (pointer:coarse){.pad{display:grid}.keys{display:none}}
+</style>
+</head>
+<body>
+<main class="app">
+  <h1>俄羅斯方塊</h1>
+  <div class="side left">
+    <div class="box"><h2>暫存</h2><canvas id="hold" width="96" height="72"></canvas></div>
+    <div class="box"><h2>分數</h2><div class="stat" id="score">0</div></div>
+    <div class="box"><h2>行數</h2><div class="stat" id="lines">0</div></div>
+    <div class="box"><h2>等級</h2><div class="stat" id="level">1</div></div>
+    <div class="box keys">←→ 移動<br>↑ / X 順轉<br>Z 逆轉<br>↓ 軟降<br>空白鍵 直落<br>C 暫存<br>P 暫停<br>Enter 開始</div>
+  </div>
+  <canvas id="board" width="300" height="600" aria-label="遊戲區"></canvas>
+  <div class="side right">
+    <div class="box"><h2>下一個</h2><canvas id="next" width="96" height="216"></canvas></div>
+  </div>
+  <div class="pad" id="pad">
+    <button data-a="left" aria-label="左移">←</button>
+    <button data-a="right" aria-label="右移">→</button>
+    <button data-a="rot" aria-label="旋轉">↻</button>
+    <button data-a="soft" aria-label="軟降">↓</button>
+    <button data-a="hard" aria-label="直落">⤓</button>
+    <button data-a="hold" aria-label="暫存">⇄</button>
+  </div>
+</main>
+<script>
+const COLS=10,ROWS=20,S=30;
+const SHAPES={
+  I:[[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],
+  O:[[1,1],[1,1]],
+  T:[[0,1,0],[1,1,1],[0,0,0]],
+  S:[[0,1,1],[1,1,0],[0,0,0]],
+  Z:[[1,1,0],[0,1,1],[0,0,0]],
+  J:[[1,0,0],[1,1,1],[0,0,0]],
+  L:[[0,0,1],[1,1,1],[0,0,0]]
+};
+const COLORS={I:'#22c7e8',O:'#f5c518',T:'#a85be0',S:'#3dbb5c',Z:'#e8473f',J:'#3f6fe8',L:'#f08a24'};
+const $=id=>document.getElementById(id);
+const bctx=$('board').getContext('2d'),hctx=$('hold').getContext('2d'),nctx=$('next').getContext('2d');
+let board,piece,queue,holdT,canHold,score,lines,level,state,last,acc;
+// state: 'ready' | 'play' | 'pause' | 'over'
+
+const clone=m=>m.map(r=>r.slice());
+const cw=m=>m[0].map((_,i)=>m.map(r=>r[i]).reverse());
+const ccw=m=>m[0].map((_,i)=>m.map(r=>r[r.length-1-i]));
+
+function bag(){
+  const a=Object.keys(SHAPES);
+  for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}
+  return a;
+}
+function valid(m,x,y){
+  for(let r=0;r<m.length;r++)for(let c=0;c<m[r].length;c++){
+    if(!m[r][c])continue;
+    const nx=x+c,ny=y+r;
+    if(nx<0||nx>=COLS||ny>=ROWS)return false;
+    if(ny>=0&&board[ny][nx])return false;
+  }
+  return true;
+}
+function spawn(t){
+  const m=clone(SHAPES[t]);
+  piece={t,m,x:Math.floor((COLS-m[0].length)/2),y:t==='I'?-1:0};
+  if(!valid(piece.m,piece.x,piece.y)){state='over'}
+}
+function nextPiece(){
+  while(queue.length<5)queue.push(...bag());
+  spawn(queue.shift());
+  canHold=true;
+}
+function reset(){
+  board=Array.from({length:ROWS},()=>Array(COLS).fill(null));
+  queue=[];holdT=null;score=0;lines=0;level=1;acc=0;last=performance.now();
+  state='play';
+  nextPiece();
+  updateStats();
+}
+function updateStats(){
+  $('score').textContent=score;$('lines').textContent=lines;$('level').textContent=level;
+}
+const interval=()=>Math.max(70,800*Math.pow(0.85,level-1));
+
+function move(dx){
+  if(state!=='play')return;
+  if(valid(piece.m,piece.x+dx,piece.y))piece.x+=dx;
+}
+function rotate(dir){
+  if(state!=='play'||piece.t==='O')return;
+  const m=dir>0?cw(piece.m):ccw(piece.m);
+  for(const k of [0,-1,1,-2,2]){
+    if(valid(m,piece.x+k,piece.y)){piece.m=m;piece.x+=k;return}
+    if(valid(m,piece.x+k,piece.y-1)){piece.m=m;piece.x+=k;piece.y-=1;return}
+  }
+}
+function soft(){
+  if(state!=='play')return;
+  if(valid(piece.m,piece.x,piece.y+1)){piece.y++;score+=1;updateStats();acc=0}
+  else lock();
+}
+function ghostY(){
+  let y=piece.y;
+  while(valid(piece.m,piece.x,y+1))y++;
+  return y;
+}
+function hard(){
+  if(state!=='play')return;
+  const gy=ghostY();
+  score+=(gy-piece.y)*2;
+  piece.y=gy;
+  lock();
+}
+function hold(){
+  if(state!=='play'||!canHold)return;
+  const cur=piece.t;
+  if(holdT){spawn(holdT)}else{nextPiece()}
+  holdT=cur;canHold=false;acc=0;
+}
+function lock(){
+  piece.m.forEach((row,r)=>row.forEach((v,c)=>{
+    if(!v)return;
+    const y=piece.y+r,x=piece.x+c;
+    if(y<0){state='over';return}
+    board[y][x]=piece.t;
+  }));
+  if(state==='over'){return}
+  let cleared=0;
+  for(let y=ROWS-1;y>=0;y--){
+    if(board[y].every(Boolean)){board.splice(y,1);board.unshift(Array(COLS).fill(null));cleared++;y++}
+  }
+  if(cleared){
+    score+=[0,100,300,500,800][cleared]*level;
+    lines+=cleared;
+    level=Math.floor(lines/10)+1;
+  }
+  updateStats();
+  nextPiece();
+  acc=0;
+}
+function togglePause(){
+  if(state==='play'){state='pause'}
+  else if(state==='pause'){state='play';last=performance.now()}
+}
+
+// ---- drawing ----
+function cell(ctx,x,y,s,color,alpha=1){
+  ctx.globalAlpha=alpha;
+  ctx.fillStyle=color;
+  ctx.fillRect(x+1,y+1,s-2,s-2);
+  ctx.fillStyle='rgba(255,255,255,.28)';
+  ctx.fillRect(x+1,y+1,s-2,Math.max(3,s*.14));
+  ctx.fillStyle='rgba(0,0,0,.18)';
+  ctx.fillRect(x+1,y+s-1-Math.max(3,s*.14),s-2,Math.max(3,s*.14));
+  ctx.globalAlpha=1;
+}
+function preview(ctx,t,ox,oy,s){
+  const m=SHAPES[t];
+  const w=m[0].length*s,h=(t==='I'?1:m.length-(t==='O'?0:1))*s;
+  const rows=m.map((r,i)=>r.some(Boolean)?i:-1).filter(i=>i>=0);
+  const top=rows[0],hh=(rows[rows.length-1]-top+1)*s;
+  const x0=ox+(96-w)/2,y0=oy+(72-hh)/2;
+  m.forEach((row,r)=>row.forEach((v,c)=>{if(v)cell(ctx,x0+c*s,y0+(r-top)*s,s,COLORS[t])}));
+}
+function overlay(ctx,lines){
+  ctx.fillStyle='rgba(10,12,18,.72)';
+  ctx.fillRect(0,0,COLS*S,ROWS*S);
+  ctx.fillStyle='#fff';ctx.textAlign='center';
+  ctx.font='800 30px "Noto Sans TC",system-ui,sans-serif';
+  ctx.fillText(lines[0],COLS*S/2,ROWS*S/2-8);
+  ctx.font='500 15px "Noto Sans TC",system-ui,sans-serif';
+  ctx.fillText(lines[1],COLS*S/2,ROWS*S/2+24);
+}
+function draw(){
+  const cs=getComputedStyle(document.documentElement);
+  const grid=cs.getPropertyValue('--grid').trim();
+  bctx.clearRect(0,0,COLS*S,ROWS*S);
+  bctx.strokeStyle=grid;bctx.lineWidth=1;
+  for(let i=1;i<COLS;i++){bctx.beginPath();bctx.moveTo(i*S+.5,0);bctx.lineTo(i*S+.5,ROWS*S);bctx.stroke()}
+  for(let i=1;i<ROWS;i++){bctx.beginPath();bctx.moveTo(0,i*S+.5);bctx.lineTo(COLS*S,i*S+.5);bctx.stroke()}
+  if(board){
+    board.forEach((row,y)=>row.forEach((t,x)=>{if(t)cell(bctx,x*S,y*S,S,COLORS[t])}));
+    if(piece&&state!=='over'){
+      const gy=ghostY();
+      piece.m.forEach((row,r)=>row.forEach((v,c)=>{
+        if(v&&gy+r>=0)cell(bctx,(piece.x+c)*S,(gy+r)*S,S,COLORS[piece.t],.22);
+      }));
+      piece.m.forEach((row,r)=>row.forEach((v,c)=>{
+        if(v&&piece.y+r>=0)cell(bctx,(piece.x+c)*S,(piece.y+r)*S,S,COLORS[piece.t]);
+      }));
+    }
+  }
+  hctx.clearRect(0,0,96,72);nctx.clearRect(0,0,96,216);
+  if(holdT){hctx.globalAlpha=canHold?1:.4;preview(hctx,holdT,0,0,20);hctx.globalAlpha=1}
+  if(queue)for(let i=0;i<3;i++)preview(nctx,queue[i],0,i*72,20);
+  if(state==='ready')overlay(bctx,['準備好了嗎','按 Enter 或點一下畫面開始']);
+  if(state==='pause')overlay(bctx,['暫停','按 P 繼續']);
+  if(state==='over')overlay(bctx,['遊戲結束',`得分 ${score}　按 Enter 重來`]);
+}
+function loop(now){
+  if(state==='play'){
+    acc+=now-last;
+    if(acc>=interval()){
+      acc=0;
+      if(valid(piece.m,piece.x,piece.y+1))piece.y++;else lock();
+    }
+  }
+  last=now;
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// ---- input ----
+document.addEventListener('keydown',e=>{
+  const k=e.key;
+  if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(k))e.preventDefault();
+  if(k==='Enter'){if(state==='ready'||state==='over')reset();return}
+  if(k==='p'||k==='P'||k==='Escape'){togglePause();return}
+  if(k==='ArrowLeft')move(-1);
+  else if(k==='ArrowRight')move(1);
+  else if(k==='ArrowDown')soft();
+  else if(e.repeat)return;
+  else if(k==='ArrowUp'||k==='x'||k==='X')rotate(1);
+  else if(k==='z'||k==='Z')rotate(-1);
+  else if(k===' ')hard();
+  else if(k==='c'||k==='C'||k==='Shift')hold();
+});
+$('board').addEventListener('click',()=>{if(state==='ready'||state==='over')reset();else if(state==='pause')togglePause()});
+const acts={left:()=>move(-1),right:()=>move(1),rot:()=>rotate(1),soft,hard,hold};
+$('pad').addEventListener('pointerdown',e=>{
+  const b=e.target.closest('button');if(!b)return;
+  e.preventDefault();
+  if(state==='ready'||state==='over'){reset();return}
+  acts[b.dataset.a]();
+});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&state==='play')state='pause'});
+
+state='ready';
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
